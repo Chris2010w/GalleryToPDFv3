@@ -1,31 +1,111 @@
-name: GalleryToPDF
-options:
-  bundleIdPrefix: com.example
-  deploymentTarget:
-    iOS: "16.0"
-settings:
-  base:
-    SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
-targets:
-  GalleryToPDF:
-    type: application
-    platform: iOS
-    sources: [Sources]
-    info:
-      path: Info.plist
-      properties:
-        CFBundleDisplayName: "Gallery → PDF"
-        UILaunchScreen: {}
-        UIFileSharingEnabled: true
-        LSSupportsOpeningDocumentsInPlace: true
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.gallerytopdf
-        TARGETED_DEVICE_FAMILY: "1,2"
-        GENERATE_INFOPLIST_FILE: NO
-        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+name: Build IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project GalleryToPDF.xcodeproj -scheme GalleryToPDF \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Download Python for iOS, yt-dlp and CA certificates
+        run: |
+          set -e
+          mkdir -p deps/extras deps/pysupport
+          curl -fL --retry 3 -o deps/py.tar.gz "https://github.com/beeware/Python-Apple-support/releases/download/3.13-b14/Python-3.13-iOS-support.b14.tar.gz"
+          tar -xzf deps/py.tar.gz -C deps/pysupport
+          curl -fL --retry 3 -o deps/extras/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+          curl -fL --retry 3 -o deps/extras/cacert.pem "https://curl.se/ca/cacert.pem"
+          echo "--- Python support layout ---"
+          find deps/pysupport -maxdepth 4 -not -path '*/lib/python3*/*' | head -60
+
+      - name: Embed Python into the app
+        run: |
+          set -e
+          APP=build/Build/Products/Release-iphoneos/GalleryToPDF.app
+          XCF=$(find deps/pysupport -type d -name Python.xcframework | head -1)
+          SLICE=$(find "$XCF" -maxdepth 1 -type d -name 'ios-arm64' | head -1)
+          echo "xcframework: $XCF"
+          echo "slice: $SLICE"
+          test -d "$SLICE/Python.framework"
+          mkdir -p "$APP/Frameworks" "$APP/python/lib" "$APP/extras"
+          cp -R "$SLICE/Python.framework" "$APP/Frameworks/"
+          cp deps/extras/* "$APP/extras/"
+          # Find the standard library (os.py): prefer the device slice, else the shared copy.
+          OSPY=$(find "$SLICE" -name os.py -path '*/python3*/os.py' | head -1)
+          if [ -z "$OSPY" ]; then OSPY=$(find "$XCF" -name os.py -path '*/python3*/os.py' | head -1); fi
+          echo "os.py: $OSPY"
+          test -n "$OSPY"
+          STD=$(dirname "$OSPY")
+          PYVER=$(basename "$STD")
+          cp -R "$STD" "$APP/python/lib/$PYVER"
+          LIBDIR="$APP/python/lib/$PYVER"
+          DYN="$LIBDIR/lib-dynload"
+          mkdir -p "$DYN"
+          # device-specific compiled modules may live in a separate folder (e.g. lib-arm64)
+          find "$SLICE" -type d -name lib-dynload | while read d; do
+            echo "dynload source: $d"
+            cp -R "$d"/. "$DYN"/
+          done
+          echo "stdlib: $LIBDIR"
+          ls "$DYN" | head -40
+          COUNT=0
+          # Apple needs native extension modules inside Frameworks/*.framework; Python finds them through
+          # a small ".fwork" text file left where the .so used to be.
+          for so in "$DYN"/*.so; do
+            [ -e "$so" ] || continue
+            base=$(basename "$so")
+            mod=${base%%.*}
+            fw="$APP/Frameworks/$mod.framework"
+            mkdir -p "$fw"
+            mv "$so" "$fw/$mod"
+            echo "Frameworks/$mod.framework/$mod" > "${so%.so}.fwork"
+            echo "python/lib/$(basename "$LIBDIR")/lib-dynload/$(basename "${so%.so}").fwork" > "$fw/$mod.origin"
+            ID="com.example.gallerytopdf.fw.$(echo "$mod" | sed 's/^_*//' | tr '_' '-')"
+            cat > "$fw/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleDevelopmentRegion</key><string>en</string>
+          <key>CFBundleExecutable</key><string>$mod</string>
+          <key>CFBundleIdentifier</key><string>$ID</string>
+          <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+          <key>CFBundleName</key><string>$mod</string>
+          <key>CFBundlePackageType</key><string>FMWK</string>
+          <key>CFBundleShortVersionString</key><string>1.0</string>
+          <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>MinimumOSVersion</key><string>16.0</string>
+          </dict></plist>
+          PLIST
+            COUNT=$((COUNT+1))
+          done
+          echo "Converted $COUNT extension modules"
+          test "$COUNT" -gt 5
+          # drop things we never use to keep the app small
+          rm -rf "$LIBDIR"/test "$LIBDIR"/idlelib "$LIBDIR"/tkinter "$LIBDIR"/turtledemo "$LIBDIR"/ensurepip
+          du -sh "$APP"
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/GalleryToPDF.app Payload/
+          zip -qr GalleryToPDF.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GalleryToPDF-ipa
+          path: GalleryToPDF.ipa
