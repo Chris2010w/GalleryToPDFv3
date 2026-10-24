@@ -41,14 +41,27 @@ jobs:
           echo "xcframework: $XCF"
           echo "slice: $SLICE"
           test -d "$SLICE/Python.framework"
-          test -d "$SLICE/lib"
-          mkdir -p "$APP/Frameworks" "$APP/python" "$APP/extras"
+          mkdir -p "$APP/Frameworks" "$APP/python/lib" "$APP/extras"
           cp -R "$SLICE/Python.framework" "$APP/Frameworks/"
-          cp -R "$SLICE/lib" "$APP/python/"
           cp deps/extras/* "$APP/extras/"
-          LIBDIR=$(find "$APP/python/lib" -maxdepth 1 -type d -name 'python3*' | head -1)
+          # Find the standard library (os.py): prefer the device slice, else the shared copy.
+          OSPY=$(find "$SLICE" -name os.py -path '*/python3*/os.py' | head -1)
+          if [ -z "$OSPY" ]; then OSPY=$(find "$XCF" -name os.py -path '*/python3*/os.py' | head -1); fi
+          echo "os.py: $OSPY"
+          test -n "$OSPY"
+          STD=$(dirname "$OSPY")
+          PYVER=$(basename "$STD")
+          cp -R "$STD" "$APP/python/lib/$PYVER"
+          LIBDIR="$APP/python/lib/$PYVER"
           DYN="$LIBDIR/lib-dynload"
+          mkdir -p "$DYN"
+          # device-specific compiled modules may live in a separate folder (e.g. lib-arm64)
+          find "$SLICE" -type d -name lib-dynload | while read d; do
+            echo "dynload source: $d"
+            cp -R "$d"/. "$DYN"/
+          done
           echo "stdlib: $LIBDIR"
+          ls "$DYN" | head -40
           COUNT=0
           # Apple needs native extension modules inside Frameworks/*.framework; Python finds them through
           # a small ".fwork" text file left where the .so used to be.
