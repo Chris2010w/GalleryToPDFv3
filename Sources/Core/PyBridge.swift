@@ -99,6 +99,71 @@ out = {}
 try:
     sys.path.insert(0, job["ytdlp"])
     import yt_dlp
+    port = int(job.get("proxy_port") or 0)
+    if port:
+        # Route every yt-dlp web request through the app's own networking (URLSession), which looks
+        # like a real iPhone/Safari connection. Sites that block Python's TLS fingerprint then work.
+        import base64, io, urllib.request
+        from email.message import Message
+        from yt_dlp.networking.common import RequestHandler, Response, register_rh, register_preference
+        from yt_dlp.networking.exceptions import HTTPError, TransportError
+
+        @register_rh
+        class SwiftBridgeRH(RequestHandler):
+            _SUPPORTED_URL_SCHEMES = ("http", "https")
+            _SUPPORTED_PROXY_SCHEMES = None
+            _SUPPORTED_FEATURES = None
+            RH_NAME = "swiftbridge"
+
+            def _check_extensions(self, extensions):
+                super()._check_extensions(extensions)
+                for k in ("cookiejar", "timeout", "legacy_ssl", "keep_header_casing"):
+                    extensions.pop(k, None)
+
+            def _send(self, request):
+                headers = self._get_headers(request)
+                jar = self._get_cookiejar(request)
+                ureq = urllib.request.Request(request.url)
+                jar.add_cookie_header(ureq)
+                ck = ureq.get_header("Cookie")
+                if ck:
+                    headers["Cookie"] = ck
+                data = request.data
+                if data is not None and not isinstance(data, (bytes, bytearray)):
+                    data = data.read() if hasattr(data, "read") else b"".join(data)
+                timeout = self._calculate_timeout(request)
+                payload = {"url": request.url, "method": request.method or ("POST" if data else "GET"),
+                           "headers": headers, "timeout": timeout,
+                           "body": base64.b64encode(data).decode() if data else ""}
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                preq = urllib.request.Request("http://127.0.0.1:%d/fetch" % port, data=json.dumps(payload).encode(),
+                                              headers={"Content-Type": "application/json"})
+                try:
+                    with opener.open(preq, timeout=timeout + 15) as r:
+                        resp = json.loads(r.read())
+                except Exception as e:
+                    # not a RequestError -> yt-dlp quietly falls back to its normal network handler
+                    raise RuntimeError("bridge unavailable: %s" % e)
+                if resp.get("error"):
+                    raise TransportError(msg=str(resp["error"]))
+                final = resp.get("url") or request.url
+                msg = Message()
+                for c in resp.get("set_cookies") or []:
+                    msg.add_header("Set-Cookie", c)
+
+                class _Resp:
+                    def info(self):
+                        return msg
+                jar.extract_cookies(_Resp(), urllib.request.Request(final))
+                body = base64.b64decode(resp.get("body") or "")
+                res = Response(io.BytesIO(body), final, resp.get("headers") or {}, status=int(resp.get("status") or 200))
+                if not 200 <= res.status < 300:
+                    raise HTTPError(res)
+                return res
+
+        @register_preference(SwiftBridgeRH)
+        def _swift_bridge_pref(rh, request):
+            return 100000
     h = int(job.get("maxheight", 1080))
     opts = {
         "quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True,
@@ -152,7 +217,9 @@ func extractVideoInfo(url: String, maxHeight: Int, workDir: String, cb: Reporter
     let outPath = workDir + "/out.json"
     try? fm.removeItem(atPath: outPath)
     try extractScript.write(toFile: scriptPath, atomically: true, encoding: .utf8)
-    let job: [String: Any] = ["url": url, "ytdlp": PyRuntime.ytdlpPath, "maxheight": maxHeight, "out": outPath]
+    let port = Int(FetchProxy.shared.start())
+    if port == 0 { cb.log("(τοπικός proxy δεν ξεκίνησε· χρήση απευθείας δικτύου)") }
+    let job: [String: Any] = ["url": url, "ytdlp": PyRuntime.ytdlpPath, "maxheight": maxHeight, "out": outPath, "proxy_port": port]
     try JSONSerialization.data(withJSONObject: job).write(to: URL(fileURLWithPath: jobPath))
 
     func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'") + "'" }
