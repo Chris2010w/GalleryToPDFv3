@@ -350,7 +350,7 @@ final class VideoEngine {
                     let mp4 = rawPath.appendingPathExtension("mp4")
                     let tmp = URL(fileURLWithPath: jobDir).appendingPathComponent("tsr\(idx)")
                     try await Task.detached(priority: .userInitiated) {
-                        try TSRemuxer.remux(src: hls, dst: mp4, tmpDir: tmp)
+                        try TSRemuxer.remux(src: hls, dst: mp4, tmpDir: tmp, log: { cb.log($0) })
                     }.value
                     try? fm.removeItem(at: hls)
                     try? fm.removeItem(at: tmp)

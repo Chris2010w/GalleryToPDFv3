@@ -281,12 +281,12 @@ final class TSRemuxer {
 
     // MARK: public entry
     /// Blocking. Run it from a background thread.
-    static func remux(src: URL, dst: URL, tmpDir: URL) throws {
+    static func remux(src: URL, dst: URL, tmpDir: URL, log: @escaping (String) -> Void = { _ in }) throws {
         let r = TSRemuxer()
-        try r.run(src: src, dst: dst, tmpDir: tmpDir)
+        try r.run(src: src, dst: dst, tmpDir: tmpDir, log: log)
     }
 
-    private func run(src: URL, dst: URL, tmpDir: URL) throws {
+    private func run(src: URL, dst: URL, tmpDir: URL, log: @escaping (String) -> Void) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let vURL = tmpDir.appendingPathComponent("v.es"), aURL = tmpDir.appendingPathComponent("a.es")
@@ -296,7 +296,9 @@ final class TSRemuxer {
         aOut = try FileHandle(forWritingTo: aURL)
         defer { try? vOut.close(); try? aOut.close() }
 
+        log("MPEG-TS: ανάγνωση...")
         try demux(src)
+        log("MPEG-TS: \(vSamples.count) καρέ βίντεο, \(aSamples.count) πακέτα ήχου")
 
         let vDesc = try videoDesc()
         var aDesc: CMAudioFormatDescription? = nil
@@ -328,39 +330,64 @@ final class TSRemuxer {
 
         var vi = 0, ai = 0
         let vCount = vSamples.count, aCount = aSamples.count
-        func wait(_ input: AVAssetWriterInput) throws {
-            while !input.isReadyForMoreMediaData {
-                if writer.status == .failed { throw writer.error ?? JobError.message("Σφάλμα εγγραφής MP4.") }
-                Thread.sleep(forTimeInterval: 0.004)
+        var lastProgress = Date()
+        var lastLogged = -1
+
+        /// Appends the next video sample. Returns false if the writer is not ready for it yet.
+        func feedVideo() throws -> Bool {
+            guard vIn.isReadyForMoreMediaData else { return false }
+            let s = vSamples[vi]
+            let nextDTS = vi + 1 < vCount ? vSamples[vi + 1].dts : s.dts + (vi > 0 ? s.dts - vSamples[vi - 1].dts : 3000)
+            let dur = max(nextDTS - s.dts, 1)
+            try vRead.seek(toOffset: UInt64(s.off))
+            let d = try vRead.read(upToCount: s.size) ?? Data()
+            if d.count == s.size, let sb = makeSample(d, vDesc, pts: CMTime(value: s.pts - base, timescale: 90000),
+                                                      dts: CMTime(value: s.dts - base, timescale: 90000),
+                                                      dur: CMTime(value: dur, timescale: 90000), sync: s.sync) {
+                if !vIn.append(sb) { throw writer.error ?? JobError.message("Σφάλμα εγγραφής βίντεο.") }
             }
+            vi += 1
+            return true
         }
+        func feedAudio() throws -> Bool {
+            guard let input = aIn, let ad = aDesc, input.isReadyForMoreMediaData else { return false }
+            let s = aSamples[ai]
+            try aRead.seek(toOffset: UInt64(s.off))
+            let d = try aRead.read(upToCount: s.size) ?? Data()
+            let ptsT = CMTime(value: (s.pts - base) * rate / 90000, timescale: CMTimeScale(rate))
+            if d.count == s.size, let sb = makeSample(d, ad, pts: ptsT, dts: .invalid,
+                                                      dur: CMTime(value: 1024, timescale: CMTimeScale(rate)), sync: true) {
+                if !input.append(sb) { throw writer.error ?? JobError.message("Σφάλμα εγγραφής ήχου.") }
+            }
+            ai += 1
+            return true
+        }
+
         while vi < vCount || (aIn != nil && ai < aCount) {
-            let vTime = vi < vCount ? Double(vSamples[vi].dts - base) / 90000.0 : Double.infinity
-            let aTime = (aIn != nil && ai < aCount) ? Double(aSamples[ai].pts - base) / 90000.0 : Double.infinity
+            if writer.status == .failed { throw writer.error ?? JobError.message("Σφάλμα εγγραφής MP4.") }
+            let haveV = vi < vCount
+            let haveA = aIn != nil && ai < aCount
+            let vTime = haveV ? Double(vSamples[vi].dts - base) / 90000.0 : Double.infinity
+            let aTime = haveA ? Double(aSamples[ai].pts - base) / 90000.0 : Double.infinity
+            var did = false
+            // Prefer the earlier sample, but if that input is blocked, feed the other one so the
+            // writer's interleaving never deadlocks.
             if vTime <= aTime {
-                let s = vSamples[vi]
-                let nextDTS = vi + 1 < vCount ? vSamples[vi + 1].dts : s.dts + (vi > 0 ? s.dts - vSamples[vi - 1].dts : 3000)
-                let dur = max(nextDTS - s.dts, 1)
-                try vRead.seek(toOffset: UInt64(s.off))
-                let d = try vRead.read(upToCount: s.size) ?? Data()
-                if d.count == s.size, let sb = makeSample(d, vDesc, pts: CMTime(value: s.pts - base, timescale: 90000),
-                                                          dts: CMTime(value: s.dts - base, timescale: 90000),
-                                                          dur: CMTime(value: dur, timescale: 90000), sync: s.sync) {
-                    try wait(vIn)
-                    if !vIn.append(sb) { throw writer.error ?? JobError.message("Σφάλμα εγγραφής βίντεο.") }
+                did = try feedVideo()
+                if !did && haveA { did = try feedAudio() }
+            } else {
+                did = try feedAudio()
+                if !did && haveV { did = try feedVideo() }
+            }
+            if did {
+                lastProgress = Date()
+                let pct = (vi * 100) / max(vCount, 1)
+                if pct / 10 != lastLogged { lastLogged = pct / 10; log("MP4: \(pct)%") }
+            } else {
+                if Date().timeIntervalSince(lastProgress) > 60 {
+                    throw JobError.message("Η εγγραφή MP4 κόλλησε (το iOS δεν δέχεται δεδομένα).")
                 }
-                vi += 1
-            } else if let input = aIn, let ad = aDesc {
-                let s = aSamples[ai]
-                try aRead.seek(toOffset: UInt64(s.off))
-                let d = try aRead.read(upToCount: s.size) ?? Data()
-                let ptsT = CMTime(value: (s.pts - base) * rate / 90000, timescale: CMTimeScale(rate))
-                if d.count == s.size, let sb = makeSample(d, ad, pts: ptsT, dts: .invalid,
-                                                          dur: CMTime(value: 1024, timescale: CMTimeScale(rate)), sync: true) {
-                    try wait(input)
-                    if !input.append(sb) { throw writer.error ?? JobError.message("Σφάλμα εγγραφής ήχου.") }
-                }
-                ai += 1
+                Thread.sleep(forTimeInterval: 0.003)
             }
         }
         vIn.markAsFinished()
