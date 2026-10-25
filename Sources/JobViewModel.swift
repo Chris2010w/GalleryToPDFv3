@@ -23,6 +23,9 @@ final class JobViewModel: ObservableObject {
     @Published var mode = "pdf"
     @Published var delayIndex = 2
     @Published var qualityIndex = 1
+    @Published var original: Bool = UserDefaults.standard.bool(forKey: "ehOriginal") {
+        didSet { UserDefaults.standard.set(original, forKey: "ehOriginal") }
+    }
     static let qualities: [Int] = [2160, 1080, 720, 480]
     static let qualityLabels = ["Έως 4K", "Έως 1080p (προτεινόμενο)", "Έως 720p", "Έως 480p"]
     var isVideo: Bool { detectSite(url.trimmingCharacters(in: .whitespacesAndNewlines))?.engine == "ytdlp" }
@@ -130,12 +133,12 @@ final class JobViewModel: ObservableObject {
         }
         let reporter = UIReporter(self)
         let nm = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let m = mode, d = Self.delays[delayIndex], ck = cookie, ql = Self.qualities[qualityIndex]
+        let m = mode, d = Self.delays[delayIndex], ck = cookie, ql = Self.qualities[qualityIndex], orig = original
 
         task = Task {
             var finalMsg: String? = nil
             do {
-                let files = try await runJob(url: u, name: nm, outDir: outDir, workRoot: workDir, mode: m, delay: d, cookie: ck, quality: ql, cb: reporter)
+                let files = try await runJob(url: u, name: nm, outDir: outDir, workRoot: workDir, mode: m, delay: d, cookie: ck, quality: ql, original: orig, cb: reporter)
                 var shown: URL? = nil
                 for f in files {
                     let dest = try saveToDocuments(URL(fileURLWithPath: f))

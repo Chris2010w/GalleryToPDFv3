@@ -27,6 +27,10 @@ struct ContentView: View {
             TextField("Όνομα (προαιρετικό)", text: $vm.name)
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
+            if vm.url.lowercased().contains("e-hentai.org") || vm.url.lowercased().contains("exhentai.org") {
+                Toggle("Πρωτότυπη ποιότητα (original)", isOn: $vm.original)
+                    .font(.subheadline)
+            }
             if vm.url.lowercased().contains("exhentai") {
                 TextField("Cookies ExHentai: ipb_member_id=…; ipb_pass_hash=…; igneous=…", text: $vm.cookie, axis: .vertical)
                     .lineLimit(1...3)
