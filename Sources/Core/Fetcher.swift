@@ -1,30 +1,50 @@
 import Foundation
 
-final class Fetcher {
+final class Fetcher: NSObject, URLSessionTaskDelegate {
     let session: URLSession
-    let cookies = HTTPCookieStorage()
+    /// Cookies are attached by hand as a "Cookie" header, only for the domain they belong to (so login cookies are never
+    /// sent to other servers, e.g. after a redirect to an image server).
+    private var jar: [(name: String, value: String, domain: String)] = []
     var extraHeaders: [String: String] = [:]
     static let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
-    init() {
+    override init() {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 30
-        cfg.httpCookieStorage = cookies
-        cfg.httpCookieAcceptPolicy = .always
+        cfg.httpCookieStorage = nil
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
         session = URLSession(configuration: cfg)
+        super.init()
     }
 
     func setCookie(name: String, value: String, domain: String) {
-        if let c = HTTPCookie(properties: [.name: name, .value: value, .domain: domain, .path: "/"]) {
-            cookies.setCookie(c)
-        }
+        let d = domain.lowercased()
+        jar.removeAll { $0.name == name && $0.domain == d }
+        jar.append((name, value, d))
+    }
+
+    private func cookieHeader(for url: URL) -> String? {
+        guard let host = url.host?.lowercased() else { return nil }
+        let items = jar.filter { host == $0.domain || host.hasSuffix("." + $0.domain) }
+        return items.isEmpty ? nil : items.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+
+    // Keep the Cookie header only while we stay on a domain the cookies belong to.
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        var r = request
+        if let u = r.url { r.setValue(cookieHeader(for: u), forHTTPHeaderField: "Cookie") }
+        completionHandler(r)
     }
 
     private func makeRequest(_ url: String, referer: String?) throws -> URLRequest {
         guard let u = URL(string: url) else { throw JobError.message("Μη έγκυρο URL: \(url)") }
         var r = URLRequest(url: u)
         r.setValue(Fetcher.ua, forHTTPHeaderField: "User-Agent")
+        r.httpShouldHandleCookies = false
         for (k, v) in extraHeaders { r.setValue(v, forHTTPHeaderField: k) }
+        if let c = cookieHeader(for: u) { r.setValue(c, forHTTPHeaderField: "Cookie") }
         if let ref = referer { r.setValue(ref, forHTTPHeaderField: "Referer") }
         return r
     }
@@ -40,7 +60,7 @@ final class Fetcher {
         for attempt in 0..<retries {
             if Task.isCancelled { throw JobError.cancelled }
             do {
-                let (d, resp) = try await session.data(for: try makeRequest(url, referer: referer))
+                let (d, resp) = try await session.data(for: try makeRequest(url, referer: referer), delegate: self)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if code >= 400 { throw JobError.message("HTTP \(code)") }
                 return d
@@ -63,7 +83,7 @@ final class Fetcher {
         for attempt in 0..<retries {
             if Task.isCancelled { throw JobError.cancelled }
             do {
-                let (tmp, resp) = try await session.download(for: try makeRequest(url, referer: referer))
+                let (tmp, resp) = try await session.download(for: try makeRequest(url, referer: referer), delegate: self)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if code >= 400 {
                     try? FileManager.default.removeItem(at: tmp)
