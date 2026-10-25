@@ -6,20 +6,28 @@ final class EHentaiEngine {
     let f = Fetcher()
     let cookie: String
     let original: Bool
-    init(cookie: String = "", original: Bool = false) { self.cookie = cookie; self.original = original }
+    var useOriginal = false
+    var loggedIn = false
+    var needNote = false
+    init(cookie: String = "", original: Bool = false) { self.cookie = cookie; self.original = original; self.useOriginal = original }
     var cache: [String: String] = [:]
 
     private func parseURL(_ url: String) throws -> (String, String) {
         guard let m = regexFirst(#"https?://(?:www\.)?(e-hentai|exhentai)\.org/g/(\d+)/([0-9a-f]+)"#, url) else {
             throw JobError.message("Το link δεν μοιάζει με gallery του e-hentai.org")
         }
+        let pairs = cookiePairs(cookie)
+        let names = pairs.map { $0.0 }
+        let hasLogin = names.contains("ipb_member_id") && names.contains("ipb_pass_hash")
         if m[1] == "exhentai" {
             host = "exhentai.org"; base = "https://exhentai.org"
-            let names = cookiePairs(cookie).map { $0.0 }
-            if !names.contains("ipb_member_id") || !names.contains("ipb_pass_hash") {
+            if !hasLogin {
                 throw JobError.message("Το ExHentai θέλει σύνδεση. Βάλε τα cookies (ipb_member_id, ipb_pass_hash, igneous) στο πεδίο «Cookies».")
             }
-            for (k, v) in cookiePairs(cookie) { f.setCookie(name: k, value: v, domain: "exhentai.org") }
+        }
+        if hasLogin {
+            loggedIn = true
+            for (k, v) in pairs { f.setCookie(name: k, value: v, domain: host) }
         }
         return (m[2], m[3])
     }
@@ -82,22 +90,30 @@ final class EHentaiEngine {
         if txt == nil { txt = try await f.text(pageURL) }
         let t = txt!
         // "Download original": the full-size file, instead of the resized one shown on the page.
-        if original, let om = regexFirst(#"<a href="([^"]+)"[^>]*>\s*Download original"#, t) {
+        if useOriginal, let om = regexFirst(#"<a href="([^"]+)"[^>]*>\s*Download original"#, t) {
             let osrc = htmlUnescape(om[1])
             let oname = URL(string: osrc)?.lastPathComponent ?? ""
             var oext = (oname as NSString).pathExtension.lowercased()
             if !imgExt.contains(oext) { oext = "jpg" }
             let odst = (folder as NSString).appendingPathComponent(String(format: "%04d.%@", index, oext))
             try await f.download(osrc, to: odst, referer: pageURL)
+            var gotHTML = false
             if let fh = FileHandle(forReadingAtPath: odst) {
-                let head = fh.readData(ofLength: 16)
+                let head = fh.readData(ofLength: 4096)
                 try? fh.close()
-                if head.first == 0x3C {          // got an HTML page instead of an image: image limit reached
+                if head.first == 0x3C {          // an HTML page instead of an image
+                    gotHTML = true
+                    let low = String(decoding: head, as: UTF8.self).lowercased()
                     try? FileManager.default.removeItem(atPath: odst)
-                    throw JobError.limitReached
+                    if low.contains("exceeded") || low.contains("viewing limit") || low.contains("image limit") {
+                        throw JobError.limitReached
+                    }
+                    // Probably a login page: the original needs an account. Use the normal image from now on.
+                    useOriginal = false
+                    needNote = true
                 }
             }
-            return
+            if !gotHTML { return }
         }
         let m = regexFirst(#"<img[^>]*id="img"[^>]*src="([^"]+)""#, t) ?? regexFirst(#"<img[^>]*src="([^"]+)"[^>]*id="img""#, t)
         guard let mm = m else { throw JobError.message("δεν βρέθηκε η εικόνα στη σελίδα") }
@@ -113,6 +129,10 @@ final class EHentaiEngine {
     func run(url: String, nameIn: String, outDir: String, workRoot: String, mode: String, delay: Double, cb: Reporter) async throws -> [String] {
         let (gid, token) = try parseURL(url)
         f.setCookie(name: "nw", value: "1", domain: host)
+        if original && !loggedIn {
+            cb.log("Για «original» το E-Hentai θέλει σύνδεση (cookies ipb_member_id + ipb_pass_hash). Χωρίς αυτά κατεβαίνει η κανονική ποιότητα.")
+            useOriginal = false
+        }
 
         cb.log("== Ανάγνωση gallery ==")
         cb.progress(0, 0, "Ανάγνωση gallery...")
@@ -137,6 +157,10 @@ final class EHentaiEngine {
                 do {
                     try await downloadPage(link, i, imgDir, useCache: true)
                     cb.log("\(i)/\(total): OK")
+                    if needNote {
+                        needNote = false
+                        cb.log("Το «Download original» δεν δούλεψε (πιθανώς λείπει login). Συνεχίζω με κανονική ποιότητα.")
+                    }
                 } catch JobError.limitReached {
                     throw JobError.limitReached
                 } catch JobError.cancelled {
