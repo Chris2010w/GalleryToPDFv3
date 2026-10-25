@@ -7,6 +7,10 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
+func hideKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
 struct ContentView: View {
     @StateObject private var vm = JobViewModel()
     @Environment(\.scenePhase) private var scenePhase
@@ -22,6 +26,8 @@ struct ContentView: View {
                 .autocorrectionDisabled()
             HStack {
                 Button("Επικόλληση") { vm.paste() }.buttonStyle(.bordered)
+                Button { hideKeyboard() } label: { Image(systemName: "keyboard.chevron.compact.down") }
+                    .buttonStyle(.bordered)
                 Text(vm.siteHint.0).font(.footnote).foregroundColor(vm.siteHint.1)
             }
             TextField("Όνομα (προαιρετικό)", text: $vm.name)
@@ -74,10 +80,17 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Color.clear.frame(height: 1).id("bottom")
                 }
+                .scrollDismissesKeyboard(.immediately)
                 .onChange(of: vm.log) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }
         .padding(16)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Κλείσιμο πληκτρολογίου") { hideKeyboard() }
+            }
+        }
         .onChange(of: scenePhase) { p in if p == .active { vm.autoPasteIfUseful() } }
         .quickLookPreview($vm.previewURL)
         .sheet(isPresented: Binding(get: { vm.shareURL != nil }, set: { if !$0 { vm.shareURL = nil } })) {
