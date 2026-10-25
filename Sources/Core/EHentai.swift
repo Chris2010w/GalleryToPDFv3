@@ -9,6 +9,7 @@ final class EHentaiEngine {
     var useOriginal = false
     var loggedIn = false
     var needNote = false
+    var debugText = ""
     init(cookie: String = "", original: Bool = false) { self.cookie = cookie; self.original = original; self.useOriginal = original }
     var cache: [String: String] = [:]
 
@@ -99,11 +100,16 @@ final class EHentaiEngine {
             try await f.download(osrc, to: odst, referer: pageURL)
             var gotHTML = false
             if let fh = FileHandle(forReadingAtPath: odst) {
-                let head = fh.readData(ofLength: 4096)
+                let head = fh.readData(ofLength: 30000)
                 try? fh.close()
                 if head.first == 0x3C {          // an HTML page instead of an image
                     gotHTML = true
-                    let low = String(decoding: head, as: UTF8.self).lowercased()
+                    let rawText = String(decoding: head, as: UTF8.self)
+                    let low = rawText.lowercased()
+                    var plain = rawText.replacingOccurrences(of: #"(?is)<(script|style)[^>]*>.*?</\1>"#, with: " ", options: .regularExpression)
+                    plain = plain.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+                    plain = plain.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    debugText = String(plain.trimmingCharacters(in: .whitespaces).prefix(300))
                     try? FileManager.default.removeItem(atPath: odst)
                     if low.contains("exceeded") || low.contains("viewing limit") || low.contains("image limit") {
                         throw JobError.limitReached
@@ -159,7 +165,9 @@ final class EHentaiEngine {
                     cb.log("\(i)/\(total): OK")
                     if needNote {
                         needNote = false
-                        cb.log("Το «Download original» δεν δούλεψε (πιθανώς λείπει login). Συνεχίζω με κανονική ποιότητα.")
+                        cb.log("Το «Download original» δεν δούλεψε. Συνεχίζω με κανονική ποιότητα.")
+                        cb.log("Απάντηση του site: \(debugText.isEmpty ? "(κενή)" : debugText)")
+                        cb.log("Cookies που στάλθηκαν: \(loggedIn ? "ναι (ipb_member_id + ipb_pass_hash)" : "όχι")")
                     }
                 } catch JobError.limitReached {
                     throw JobError.limitReached
