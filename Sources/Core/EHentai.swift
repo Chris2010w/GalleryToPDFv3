@@ -5,7 +5,8 @@ final class EHentaiEngine {
     var host = "e-hentai.org"
     let f = Fetcher()
     let cookie: String
-    init(cookie: String = "") { self.cookie = cookie }
+    let original: Bool
+    init(cookie: String = "", original: Bool = false) { self.cookie = cookie; self.original = original }
     var cache: [String: String] = [:]
 
     private func parseURL(_ url: String) throws -> (String, String) {
@@ -80,6 +81,24 @@ final class EHentaiEngine {
         var txt: String? = useCache ? cache.removeValue(forKey: pageURL) : nil
         if txt == nil { txt = try await f.text(pageURL) }
         let t = txt!
+        // "Download original": the full-size file, instead of the resized one shown on the page.
+        if original, let om = regexFirst(#"<a href="([^"]+)"[^>]*>\s*Download original"#, t) {
+            let osrc = htmlUnescape(om[1])
+            let oname = URL(string: osrc)?.lastPathComponent ?? ""
+            var oext = (oname as NSString).pathExtension.lowercased()
+            if !imgExt.contains(oext) { oext = "jpg" }
+            let odst = (folder as NSString).appendingPathComponent(String(format: "%04d.%@", index, oext))
+            try await f.download(osrc, to: odst, referer: pageURL)
+            if let fh = FileHandle(forReadingAtPath: odst) {
+                let head = fh.readData(ofLength: 16)
+                try? fh.close()
+                if head.first == 0x3C {          // got an HTML page instead of an image: image limit reached
+                    try? FileManager.default.removeItem(atPath: odst)
+                    throw JobError.limitReached
+                }
+            }
+            return
+        }
         let m = regexFirst(#"<img[^>]*id="img"[^>]*src="([^"]+)""#, t) ?? regexFirst(#"<img[^>]*src="([^"]+)"[^>]*id="img""#, t)
         guard let mm = m else { throw JobError.message("δεν βρέθηκε η εικόνα στη σελίδα") }
         let src = htmlUnescape(mm[1])

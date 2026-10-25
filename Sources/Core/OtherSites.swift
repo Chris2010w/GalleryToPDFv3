@@ -265,7 +265,7 @@ final class HitomiEngine {
 }
 
 // MARK: - Entry point (port of run_job)
-func runJob(url rawURL: String, name: String, outDir: String, workRoot: String, mode: String, delay: Double, cookie: String = "", quality: Int = 1080, cb: Reporter) async throws -> [String] {
+func runJob(url rawURL: String, name: String, outDir: String, workRoot: String, mode: String, delay: Double, cookie: String = "", quality: Int = 1080, original: Bool = false, cb: Reporter) async throws -> [String] {
     let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let site = detectSite(url) else { throw JobError.message("Δεν αναγνώρισα το site αυτού του link.") }
     try FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
@@ -273,7 +273,7 @@ func runJob(url rawURL: String, name: String, outDir: String, workRoot: String, 
     do {
         switch site.engine {
         case "ehentai":
-            return try await EHentaiEngine(cookie: cookie).run(url: url, nameIn: name, outDir: outDir, workRoot: workRoot, mode: mode, delay: delay, cb: cb)
+            return try await EHentaiEngine(cookie: cookie, original: original).run(url: url, nameIn: name, outDir: outDir, workRoot: workRoot, mode: mode, delay: delay, cb: cb)
         case "nhentai":
             return try await NHentaiEngine().run(url: url, nameIn: name, outDir: outDir, workRoot: workRoot, mode: mode, delay: delay, cb: cb)
         case "ytdlp":
